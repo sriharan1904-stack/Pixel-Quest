@@ -1,0 +1,6 @@
+{
+  "name": "Pixel Quest 2012",
+  "description": "Retro 2D pixel platformer game inspired by 2012 mobile games, with AI-powered level designer sandbox, custom quests, and funny wise NPC guides.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
