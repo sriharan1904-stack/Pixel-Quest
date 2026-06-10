@@ -244,6 +244,34 @@ class RetroAudioEngine {
     }
   }
 
+  // Laser shoot sound
+  playShoot() {
+    if (this.muted) return;
+    try {
+      this.init();
+      if (!this.ctx) return;
+      const t = this.ctx.currentTime;
+      
+      const osc = this.ctx.createOscillator();
+      const gain = this.ctx.createGain();
+      
+      osc.type = 'sawtooth';
+      osc.frequency.setValueAtTime(750, t);
+      osc.frequency.exponentialRampToValueAtTime(150, t + 0.12);
+      
+      gain.gain.setValueAtTime(0.05, t);
+      gain.gain.exponentialRampToValueAtTime(0.001, t + 0.12);
+      
+      osc.connect(gain);
+      gain.connect(this.ctx.destination);
+      
+      osc.start(t);
+      osc.stop(t + 0.12);
+    } catch (e) {
+      console.warn('Audio play error', e);
+    }
+  }
+
   // Loops a chiptune melody in the background
   playBGM(type: 'world' | 'boss' | 'menu') {
     this.currentBgmType = type;
@@ -383,6 +411,98 @@ class RetroAudioEngine {
       scheduleMelody();
     } catch (e) {
       console.warn('BGM scheduling error', e);
+    }
+  }
+
+  // Plays an AI generated/loop custom composition
+  playAIComposition(composition: { name: string; tempo: number; notes: { freq: number; duration: number; type: string }[]; bassline?: { freq: number; duration: number; type: string }[] }) {
+    this.currentBgmType = null;
+    if (this.muted) return;
+    
+    try {
+      this.init();
+      if (!this.ctx) return;
+      
+      this.stopBGM();
+      
+      let step = 0;
+      const notes = composition.notes || [];
+      const bass = composition.bassline || [];
+      
+      if (notes.length === 0) return;
+      
+      const tempo = composition.tempo || 140;
+      const beatDuration = 60 / tempo; // duration of quarter note
+      
+      const scheduleMelody = () => {
+        if (this.muted || !this.ctx) return;
+        
+        const nextTime = this.ctx.currentTime;
+        const currentNote = notes[step % notes.length];
+        
+        let melodyNode: OscillatorNode | null = null;
+        let melodyGain: GainNode | null = null;
+        
+        if (currentNote && currentNote.freq > 0) {
+          melodyNode = this.ctx.createOscillator();
+          melodyGain = this.ctx.createGain();
+          
+          melodyNode.type = (currentNote.type as any) || 'triangle';
+          melodyNode.frequency.setValueAtTime(currentNote.freq, nextTime);
+          
+          const dur = (currentNote.duration || 0.25) * beatDuration;
+          
+          melodyGain.gain.setValueAtTime(0.015, nextTime);
+          melodyGain.gain.exponentialRampToValueAtTime(0.001, nextTime + dur * 0.95);
+          
+          melodyNode.connect(melodyGain);
+          melodyGain.connect(this.ctx.destination);
+          
+          melodyNode.start(nextTime);
+          melodyNode.stop(nextTime + dur);
+          this.activeBgmOscillators.push({ osc: melodyNode, gain: melodyGain });
+        }
+        
+        if (bass.length > 0) {
+          const currentBass = bass[step % bass.length];
+          if (currentBass && currentBass.freq > 0) {
+            const bassNode = this.ctx.createOscillator();
+            const bassGain = this.ctx.createGain();
+            
+            bassNode.type = (currentBass.type as any) || 'square';
+            bassNode.frequency.setValueAtTime(currentBass.freq, nextTime);
+            
+            const dur = (currentBass.duration || 0.25) * beatDuration;
+            
+            bassGain.gain.setValueAtTime(0.012, nextTime);
+            bassGain.gain.exponentialRampToValueAtTime(0.001, nextTime + dur * 0.95);
+            
+            bassNode.connect(bassGain);
+            bassGain.connect(this.ctx.destination);
+            
+            bassNode.start(nextTime);
+            bassNode.stop(nextTime + dur);
+            this.activeBgmOscillators.push({ osc: bassNode, gain: bassGain });
+          }
+        }
+        
+        const nextNoteDur = ((currentNote ? currentNote.duration : 0.25) || 0.25) * beatDuration;
+        step++;
+        
+        this.activeBgmOscillators = this.activeBgmOscillators.filter(item => {
+          try {
+            return item.osc.frequency.value > 0;
+          } catch(e) {
+            return false;
+          }
+        });
+        
+        this.bgmTimeout = setTimeout(scheduleMelody, nextNoteDur * 1000);
+      };
+      
+      scheduleMelody();
+    } catch (e) {
+      console.warn('AI BGM scheduling error', e);
     }
   }
 

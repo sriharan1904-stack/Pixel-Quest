@@ -17,6 +17,7 @@ export default function GameCanvas({ layout, stats, onUpdateCoins, onLevelComple
 
   // Game UI States
   const [isPlaying, setIsPlaying] = useState(true);
+  const [isJetpackMode, setIsJetpackMode] = useState(true);
   const [lives, setLives] = useState(3);
   const [health, setHealth] = useState(3); // Start with 3 hearts (max health can be upgraded)
   const [maxHealth, setMaxHealth] = useState(3);
@@ -36,6 +37,7 @@ export default function GameCanvas({ layout, stats, onUpdateCoins, onLevelComple
     right: false,
     jump: false,
     dash: false,
+    shoot: false,
   });
 
   // Track if level items are loaded / mutable copies
@@ -46,6 +48,7 @@ export default function GameCanvas({ layout, stats, onUpdateCoins, onLevelComple
     powerups: any[];
     checkpoint: { x: number; y: number; activated: boolean };
     goal: { x: number; y: number; width: number; height: number };
+    zappers: any[];
   }>({
     platforms: [],
     enemies: [],
@@ -53,6 +56,7 @@ export default function GameCanvas({ layout, stats, onUpdateCoins, onLevelComple
     powerups: [],
     checkpoint: { x: 0, y: 0, activated: false },
     goal: { x: 0, y: 0, width: 40, height: 80 },
+    zappers: [],
   });
 
   // Physics constraints & parameters
@@ -82,6 +86,7 @@ export default function GameCanvas({ layout, stats, onUpdateCoins, onLevelComple
     invincibleActive: false,
     invincibleDuration: 0,
     immunityTimer: 0, // brief immunity after taking damage
+    shootCooldown: 0, // Player shooting rate limiting
 
     // Animation frames
     animFrame: 0,
@@ -90,6 +95,9 @@ export default function GameCanvas({ layout, stats, onUpdateCoins, onLevelComple
 
   // Particle list
   const particlesRef = useRef<any[]>([]);
+
+  // Player gun bullets list
+  const playerBulletsRef = useRef<any[]>([]);
 
   // Timer loop
   useEffect(() => {
@@ -111,9 +119,71 @@ export default function GameCanvas({ layout, stats, onUpdateCoins, onLevelComple
     setIsGameOver(false);
     setIsGameWon(false);
 
-    // Deep copy layout elements to allow collection/damage mutations
+    // Deep copy and enrich layout elements with Mario Question Blocks and Jetpack Zappers!
+    const rawPlatforms = JSON.parse(JSON.stringify(layout.platforms));
+    const rawZappers = JSON.parse(JSON.stringify(layout.zappers || []));
+    
+    // Convert floating platforms at proper heights into Mario Question Blocks!
+    rawPlatforms.forEach((plat: any) => {
+      // Small to medium platforms in air
+      if (plat.width <= 180 && !plat.behavior && plat.y < 390 && plat.id !== 'w_start' && plat.id !== 'w_end') {
+        plat.isQuestionBlock = true;
+        plat.questionState = 'active';
+        plat.questionContent = Math.random() < 0.25 ? 'shield' : 'coin';
+        plat.bounceY = 0;
+      }
+    });
+
+    // Make sure we have at least 3 Question Blocks in the level if none found
+    const qCount = rawPlatforms.filter((p: any) => p.isQuestionBlock).length;
+    if (qCount < 3 && rawPlatforms.length > 5) {
+      for (let i = 2; i < Math.min(rawPlatforms.length - 1, 8); i++) {
+        const p = rawPlatforms[i];
+        if (p.width >= 40 && p.y < 420 && p.id !== 'w_start' && p.id !== 'w_end') {
+          p.isQuestionBlock = true;
+          p.questionState = 'active';
+          p.questionContent = 'coin';
+          p.bounceY = 0;
+        }
+      }
+    }
+
+    // Generate procedural Jetpack Joyride electric zappers if none exist!
+    if (rawZappers.length === 0) {
+      const levelEndAbsoluteX = layout.goal ? layout.goal.x : (layout.length ? layout.length * 32 : 2500);
+      let currentZpX = 450;
+      let zpId = 1;
+      while (currentZpX < levelEndAbsoluteX - 350) {
+        const isSpinned = Math.random() < 0.4;
+        const zpY = 120 + Math.floor(Math.random() * 150); // heights safe for flight
+        
+        if (isSpinned) {
+          rawZappers.push({
+            id: `zapper_proc_${zpId++}`,
+            x: currentZpX,
+            y: zpY,
+            width: 80,
+            height: 80,
+            angle: Math.random() * Math.PI,
+            active: true
+          });
+        } else {
+          const isVert = Math.random() < 0.5;
+          rawZappers.push({
+            id: `zapper_proc_${zpId++}`,
+            x: currentZpX,
+            y: zpY,
+            width: isVert ? 12 : 80,
+            height: isVert ? 80 : 12,
+            active: true
+          });
+        }
+        currentZpX += 280 + Math.floor(Math.random() * 180); // Distance between zappers
+      }
+    }
+
     levelStateRef.current = {
-      platforms: JSON.parse(JSON.stringify(layout.platforms)),
+      platforms: rawPlatforms,
       enemies: JSON.parse(JSON.stringify(layout.enemies)),
       collectibles: JSON.parse(JSON.stringify(layout.collectibles || [])),
       powerups: JSON.parse(JSON.stringify(layout.powerups || [])),
@@ -123,6 +193,7 @@ export default function GameCanvas({ layout, stats, onUpdateCoins, onLevelComple
         activated: false 
       },
       goal: { ...layout.goal },
+      zappers: rawZappers
     };
 
     // Spawn player at start (x 100, y 350)
@@ -135,9 +206,15 @@ export default function GameCanvas({ layout, stats, onUpdateCoins, onLevelComple
     playerRef.current.magnetActive = false;
     playerRef.current.invincibleActive = false;
     playerRef.current.immunityTimer = 0;
+    playerRef.current.shootCooldown = 0;
+    playerBulletsRef.current = [];
 
     // Play classic context BGM
-    sound.playBGM(layout.theme === 'sky' || stats.healthLevel >= 2 ? 'boss' : 'world');
+    if (layout.customBgm) {
+      sound.playAIComposition(layout.customBgm);
+    } else {
+      sound.playBGM(layout.theme === 'sky' || stats.healthLevel >= 2 ? 'boss' : 'world');
+    }
 
     return () => sound.stopBGM();
   }, [layout, stats]);
@@ -204,7 +281,9 @@ export default function GameCanvas({ layout, stats, onUpdateCoins, onLevelComple
       // 1. UPDATE STATE
       updatePhysics();
       updateEnemies();
+      updateZappers();
       updateParticles();
+      updatePlayerBullets();
 
       // 2. RENDERING
       drawGame(ctx, canvas);
@@ -261,6 +340,31 @@ export default function GameCanvas({ layout, stats, onUpdateCoins, onLevelComple
     const rightInput = keysRef.current['ArrowRight'] || keysRef.current['KeyD'] || virtualControlsRef.current.right;
     const jumpInput = keysRef.current['ArrowUp'] || keysRef.current['Space'] || keysRef.current['KeyW'] || virtualControlsRef.current.jump;
     const dashInput = keysRef.current['ShiftLeft'] || keysRef.current['KeyX'] || virtualControlsRef.current.dash;
+    const shootInput = keysRef.current['KeyF'] || keysRef.current['f'] || keysRef.current['Enter'] || keysRef.current['KeyZ'] || virtualControlsRef.current.shoot;
+
+    // Firing shooting bullets using Mario's gun
+    if (player.shootCooldown === undefined) player.shootCooldown = 0;
+    if (player.shootCooldown > 0) player.shootCooldown--;
+
+    if (shootInput && player.shootCooldown <= 0) {
+      player.shootCooldown = 15; // 15 frames cooldown between shots
+      sound.playShoot();
+      
+      const bulletX = player.facing > 0 ? player.x + player.width + 12 : player.x - 16;
+      const bulletY = player.y + 24;
+      
+      playerBulletsRef.current.push({
+        x: bulletX,
+        y: bulletY,
+        vx: player.facing * 11,
+        vy: 0,
+        width: 12,
+        height: 6,
+        color: '#fbbf24',
+        life: 1.0,
+        decay: 0.02
+      });
+    }
 
     // Facing direction
     if (leftInput && !rightInput) {
@@ -333,27 +437,73 @@ export default function GameCanvas({ layout, stats, onUpdateCoins, onLevelComple
       if (player.vy > terminalVelocity) player.vy = terminalVelocity;
     }
 
-    // Jump Input Triggers
-    if (jumpInput) {
-      // Prevent holding key down from repeating jump instantly
-      if (!keysRef.current['processedJump'] && !virtualControlsRef.current.jump) {
-        if (player.isOnGround) {
-          player.vy = -baseJumpMultiplier;
-          player.isOnGround = false;
-          player.hasDoubleJumped = false;
-          sound.playJump();
-          spawnExplosionParticles(player.x + player.width / 2, player.y + player.height, 'rgba(255,255,255,0.4)', 4);
-        } else if (!player.hasDoubleJumped) {
-          player.vy = -baseJumpMultiplier * 0.9;
-          player.hasDoubleJumped = true;
-          sound.playJump();
-          spawnExplosionParticles(player.x + player.width / 2, player.y + player.height / 2, '#67e8f9', 6);
+    // Jump / Thrust Input Triggers (Jetpack Joyride vs Super Mario)
+    if (isJetpackMode) {
+      if (jumpInput) {
+        // Continuous upward thrust in jetpack mode
+        player.vy = Math.max(player.vy - 0.75, -7.5);
+        player.isOnGround = false;
+
+        // Signature Jetpack Joyride Machine-Gun bullet sparks discharging downward!
+        if (Math.random() < 0.45) {
+          sound.playShoot(); // nice tactile audio feedback
+          
+          const sparkDirectionX = player.facing > 0 ? player.x + 2 : player.x + player.width - 6;
+          const sparkY = player.y + player.height - 4;
+          
+          // These sparks travel down, stomping any walker / flyer enemies directly below Mario!
+          playerBulletsRef.current.push({
+            id: `spark_${Date.now()}_${Math.random()}`,
+            x: sparkDirectionX + (Math.random() - 0.5) * 6,
+            y: sparkY,
+            vx: (Math.random() - 0.5) * 4,
+            vy: 10 + Math.random() * 3, // fast downward speed
+            width: 8,
+            height: 12,
+            color: '#fbbf24', // high-spark yellow
+            life: 1.0,
+            decay: 0.05,
+            isJetpackSpark: true
+          });
         }
-        
-        keysRef.current['processedJump'] = true;
+
+        // Fire & smoke particles from the jetpack nozzle
+        for (let i = 0; i < 2; i++) {
+          particlesRef.current.push({
+            x: (player.facing > 0 ? player.x - 2 : player.x + player.width + 2) + (Math.random() - 0.5) * 6,
+            y: player.y + player.height - 10,
+            vx: -player.facing * 1.5 + (Math.random() - 0.5) * 2,
+            vy: 4 + Math.random() * 3,
+            radius: Math.random() * 4 + 3,
+            color: Math.random() < 0.65 ? '#fbbf24' : '#ef4444', // flame look
+            alpha: 1.0,
+            life: 1.0,
+            decay: 0.12
+          });
+        }
       }
     } else {
-      keysRef.current['processedJump'] = false;
+      if (jumpInput) {
+        // Prevent holding key down from repeating jump instantly
+        if (!keysRef.current['processedJump'] && !virtualControlsRef.current.jump) {
+          if (player.isOnGround) {
+            player.vy = -baseJumpMultiplier;
+            player.isOnGround = false;
+            player.hasDoubleJumped = false;
+            sound.playJump();
+            spawnExplosionParticles(player.x + player.width / 2, player.y + player.height, 'rgba(255,255,255,0.4)', 4);
+          } else if (!player.hasDoubleJumped) {
+            player.vy = -baseJumpMultiplier * 0.9;
+            player.hasDoubleJumped = true;
+            sound.playJump();
+            spawnExplosionParticles(player.x + player.width / 2, player.y + player.height / 2, '#67e8f9', 6);
+          }
+          
+          keysRef.current['processedJump'] = true;
+        }
+      } else {
+        keysRef.current['processedJump'] = false;
+      }
     }
 
     // Move Player along Y and check platform collisions
@@ -459,6 +609,7 @@ export default function GameCanvas({ layout, stats, onUpdateCoins, onLevelComple
   // Resolve platform heights vertically
   const resolveVerticalCollisions = (platforms: any[]) => {
     const player = playerRef.current;
+    const level = levelStateRef.current;
     player.isOnGround = false;
 
     platforms.forEach((plat) => {
@@ -501,6 +652,35 @@ export default function GameCanvas({ layout, stats, onUpdateCoins, onLevelComple
           // Colliding ceiling head-butt
           player.y = plat.y + plat.height;
           player.vy = 0.5; // slide down
+
+          // Mario Question Block Trigger!
+          if (plat.isQuestionBlock && plat.questionState !== 'empty') {
+            plat.questionState = 'empty';
+            plat.bounceY = -14;
+            sound.playCoin();
+            setCoinsCollected(prev => prev + 1);
+            setCurrentScore(prev => prev + 150);
+            
+            // Nice gold coin explosion
+            spawnExplosionParticles(plat.x + plat.width / 2, plat.y - 12, '#facc15', 12);
+            
+            // Randomly spawn a Powerup directly above the question block!
+            if (Math.random() < 0.45) {
+              const types = ['shield', 'speed', 'magnet', 'invincibility'];
+              const chosen = types[Math.floor(Math.random() * types.length)];
+              level.powerups.push({
+                id: `pwup_box_${Date.now()}_${Math.random()}`,
+                x: plat.x + plat.width / 2 - 15,
+                y: plat.y - 45,
+                width: 30,
+                height: 30,
+                type: chosen,
+                collected: false
+              });
+              sound.playPowerUp();
+              spawnExplosionParticles(plat.x + plat.width / 2, plat.y - 30, '#a855f7', 8);
+            }
+          }
         }
       }
     });
@@ -563,30 +743,302 @@ export default function GameCanvas({ layout, stats, onUpdateCoins, onLevelComple
           }
         }
       } else if (enemy.type === 'boss') {
-        // Boss tracks player and fires pixel energy pellets
         const dx = player.x - enemy.x;
-        enemy.x += Math.sign(dx) * 1.2; // pursue
+        const dy = player.y - enemy.y;
         
-        if (!enemy.shootTimer) enemy.shootTimer = 100;
-        enemy.shootTimer--;
+        // --- CHOOSE BOSS SUB-TYPE BEHAVIOR OR DEFAULT ---
+        const subType = enemy.bossSubType || 'default';
         
-        if (enemy.shootTimer <= 0) {
-          enemy.shootTimer = 100;
-          sound.playDamage(); // project noise
-          // Fire a projectile / pellet towards player direction
-          particlesRef.current.push({
-            x: enemy.x + enemy.width / 2,
-            y: enemy.y + 10,
-            vx: Math.sign(dx) * 4.5,
-            vy: -1.5,
-            radius: 5,
-            color: '#ef4444',
-            alpha: 1,
-            life: 2.0,
-            decay: 0.015,
-            isProjectile: true
-          });
+        if (subType === 'slime_emperor') {
+          // --- LORD VOLDESLIME Pattern ---
+          // Slithers on ground, then launches high sky slams
+          if (!enemy.state) enemy.state = 'idle';
+          if (!enemy.jumpTimer) enemy.jumpTimer = 110;
+          
+          enemy.jumpTimer--;
+          
+          if (enemy.state === 'idle') {
+            // Move slowly towards the player horizontally
+            enemy.x += Math.sign(dx) * 0.9;
+            
+            if (enemy.jumpTimer <= 0) {
+              enemy.state = 'jumping';
+              enemy.jumpTimer = 160; // reset cooldown
+              enemy.vy = -16; // high vertical jump
+              sound.playJump();
+              // spawn landing particles
+              spawnExplosionParticles(enemy.x + enemy.width/2, enemy.y + enemy.height, '#10b981', 8);
+            }
+          } else if (enemy.state === 'jumping') {
+            // Move horizontally while in the air
+            enemy.x += Math.sign(dx) * 1.5;
+            
+            // Gravity
+            enemy.vy += 0.55;
+            enemy.y += enemy.vy;
+            
+            // Check ground land
+            if (enemy.y >= 360) {
+              enemy.y = 360;
+              enemy.vy = 0;
+              enemy.state = 'idle';
+              sound.playDamage(); // shockwave rumble
+              
+              // 8-split green slime splatter burst!
+              for (let angle = 0; angle < Math.PI; angle += Math.PI / 6) {
+                particlesRef.current.push({
+                  x: enemy.x + enemy.width / 2,
+                  y: enemy.y + enemy.height - 10,
+                  vx: Math.cos(angle) * 6,
+                  vy: -Math.sin(angle) * 7,
+                  radius: 7,
+                  color: '#22c55e', // toxic slasher green
+                  alpha: 1,
+                  life: 1.5,
+                  decay: 0.02,
+                  isProjectile: true
+                });
+              }
+              // Spawn little ground toxic slimes occasionally!
+              if (Math.random() < 0.6) {
+                level.enemies.push({
+                  id: `slime_minion_${Date.now()}_${Math.random()}`,
+                  x: enemy.x + (Math.random() - 0.5) * 60,
+                  y: 405,
+                  width: 24,
+                  height: 24,
+                  type: 'walker',
+                  health: 1,
+                  maxHealth: 1,
+                  speed: 2.0,
+                  patrolRange: 150,
+                  startX: enemy.x,
+                  startY: 405,
+                  direction: Math.random() < 0.5 ? 1 : -1,
+                  isMinion: true
+                });
+              }
+            }
+          }
+          
+          // Regular shooting
+          if (!enemy.shootTimer) enemy.shootTimer = 90;
+          enemy.shootTimer--;
+          if (enemy.shootTimer <= 0) {
+            enemy.shootTimer = 90;
+            // 3-way green splatter targeting
+            for (let i = -1; i <= 1; i++) {
+              particlesRef.current.push({
+                x: enemy.x + enemy.width / 2,
+                y: enemy.y + 20,
+                vx: Math.sign(dx) * 4.0 + i * 1.5,
+                vy: i * 2.5 - 2,
+                radius: 6,
+                color: '#10b981',
+                alpha: 1,
+                life: 1.8,
+                decay: 0.015,
+                isProjectile: true
+              });
+            }
+          }
+          
+        } else if (subType === 'mecha_cyborg') {
+          // --- MECHA BOWSER 9000 Pattern ---
+          // Hover and dashing lasers
+          enemy.y = enemy.startY + Math.sin(Date.now() / 140) * 40;
+          
+          if (!enemy.dashCooldown) enemy.dashCooldown = 150;
+          enemy.dashCooldown--;
+          
+          if (enemy.dashCooldown <= 40 && enemy.dashCooldown > 0) {
+            // Charging flash warning
+            if (Date.now() % 100 < 50) {
+              enemy.isChargingWarning = true;
+            } else {
+              enemy.isChargingWarning = false;
+            }
+          } else if (enemy.dashCooldown <= 0) {
+            // Unleash direct horizontal thruster ramming dash!
+            enemy.dashCooldown = 150;
+            enemy.isChargingWarning = false;
+            // teleport-like extreme quick thrust speed
+            enemy.x += Math.sign(dx) * 450;
+            if (enemy.x < 50) enemy.x = 50;
+            if (enemy.x > 1050) enemy.x = 1050;
+            sound.playJump();
+            spawnExplosionParticles(enemy.x, enemy.y + enemy.height/2, '#fbbf24', 15);
+          } else {
+            // Standard tracking movement
+            enemy.x += Math.sign(dx) * 1.6;
+          }
+          
+          // Mecha laser pulses
+          if (!enemy.shootTimer) enemy.shootTimer = 70;
+          enemy.shootTimer--;
+          if (enemy.shootTimer <= 0) {
+            enemy.shootTimer = 70;
+            sound.playShoot();
+            // Ultra fast cyber spark projectile
+            particlesRef.current.push({
+              x: enemy.x + enemy.width / 2,
+              y: enemy.y + enemy.height / 2,
+              vx: Math.sign(dx) * 8.5,
+              vy: (dy / (Math.abs(dx) || 1)) * 6.0,
+              radius: 4,
+              color: '#06b6d4', // cyan electric cyber bullet
+              alpha: 1,
+              life: 1.2,
+              decay: 0.02,
+              isProjectile: true
+            });
+          }
+          
+        } else if (subType === 'skull_eye') {
+          // --- BEHOLDER OF DREAD ---
+          // Floating colossal eye. Teleports closer and homing shots!
+          enemy.y = enemy.startY + Math.sin(Date.now() / 180) * 30;
+          
+          if (!enemy.teleportTimer) enemy.teleportTimer = 220;
+          enemy.teleportTimer--;
+          
+          if (enemy.teleportTimer <= 0) {
+            enemy.teleportTimer = 220;
+            // Spawn creepy purple smoke where it was
+            spawnExplosionParticles(enemy.x + enemy.width/2, enemy.y + enemy.height/2, '#c084fc', 20);
+            
+            // Teleport to the safe opposite sector in the arena
+            const newX = player.x > 600 ? 150 + Math.random()*200 : 750 + Math.random()*200;
+            const newY = 130 + Math.random()*120;
+            enemy.x = newX;
+            enemy.y = newY;
+            enemy.startY = newY;
+            
+            sound.playPowerUp();
+            // Spawn purple smoke where it landed
+            spawnExplosionParticles(enemy.x + enemy.width/2, enemy.y + enemy.height/2, '#818cf8', 20);
+          } else {
+            // Micro creeping tracks
+            enemy.x += Math.sign(dx) * 0.8;
+          }
+          
+          // Blink/Eye Shield immunity cycle
+          const eyeCycle = Math.round(Date.now() / 120) % 15;
+          if (eyeCycle === 0 || eyeCycle === 1) {
+            enemy.isEyeShieldActive = true; // bullets bounce off!
+          } else {
+            enemy.isEyeShieldActive = false;
+          }
+          
+          // Homing death void sphere shooting
+          if (!enemy.shootTimer) enemy.shootTimer = 110;
+          enemy.shootTimer--;
+          if (enemy.shootTimer <= 0) {
+            enemy.shootTimer = 110;
+            sound.playShoot();
+            // Spawn homing void orb
+            particlesRef.current.push({
+              x: enemy.x + enemy.width / 2,
+              y: enemy.y + enemy.height / 2,
+              vx: Math.sign(dx) * 2.2,
+              vy: Math.sign(dy) * 2.2,
+              radius: 9,
+              color: '#d8b4fe', // light purple outline
+              alpha: 1,
+              life: 3.5,
+              decay: 0.008,
+              isProjectile: true,
+              isHomingVoid: true // Custom homing behavior handled in particle loop!
+            });
+            // Spawn small creepy bat minions
+            if (Math.random() < 0.45) {
+              level.enemies.push({
+                id: `creepy_bat_${Date.now()}_${Math.random()}`,
+                x: enemy.x + (Math.random() - 0.5) * 50,
+                y: enemy.y + 40,
+                width: 24,
+                height: 24,
+                type: 'flyer',
+                health: 1,
+                maxHealth: 1,
+                speed: 2.2,
+                patrolRange: 200,
+                startX: enemy.x,
+                startY: enemy.y + 40,
+                direction: Math.sign(dx),
+                isMinion: true
+              });
+            }
+          }
+          
+        } else {
+          // --- DEFAULT STAGE 3 BOSS PATTERN ---
+          enemy.x += Math.sign(dx) * 1.2;
+          
+          if (!enemy.shootTimer) enemy.shootTimer = 100;
+          enemy.shootTimer--;
+          if (enemy.shootTimer <= 0) {
+            enemy.shootTimer = 100;
+            sound.playDamage();
+            particlesRef.current.push({
+              x: enemy.x + enemy.width / 2,
+              y: enemy.y + 10,
+              vx: Math.sign(dx) * 4.5,
+              vy: -1.5,
+              radius: 5,
+              color: '#ef4444',
+              alpha: 1,
+              life: 2.0,
+              decay: 0.015,
+              isProjectile: true
+            });
+          }
         }
+
+        // Initialize Swords & Tentacles weapons if not present (Universal except for custom sizes)
+        if (enemy.tentacleOffset === undefined) {
+          enemy.tentacleOffset = 0;
+          enemy.swords = [
+            { angle: 0, speed: 0.045 },
+            { angle: Math.PI, speed: 0.045 }
+          ];
+        }
+
+        // Animate orbiters
+        enemy.tentacleOffset += 0.06;
+        enemy.swords.forEach((sw: any) => {
+          sw.angle += sw.speed;
+        });
+
+        // Trace and check collision for Tentacle 1 (Left Tentacle Weapon)
+        const tentacleReach = subType === 'skull_eye' ? 40 : 25;
+        const t1x = enemy.x - 20 + Math.sin(enemy.tentacleOffset) * tentacleReach;
+        const t1y = enemy.y + enemy.height / 2 + Math.cos(enemy.tentacleOffset) * (tentacleReach + 10);
+        const distT1 = Math.sqrt(Math.pow((player.x + player.width/2) - t1x, 2) + Math.pow((player.y + player.height/2) - t1y, 2));
+        if (distT1 < 25) {
+          handleTakeDamage();
+        }
+
+        // Trace and check collision for Tentacle 2 (Right Tentacle Weapon)
+        const t2x = enemy.x + enemy.width + 20 + Math.cos(enemy.tentacleOffset) * tentacleReach;
+        const t2y = enemy.y + enemy.height / 2 + Math.sin(enemy.tentacleOffset) * (tentacleReach + 10);
+        const distT2 = Math.sqrt(Math.pow((player.x + player.width/2) - t2x, 2) + Math.pow((player.y + player.height/2) - t2y, 2));
+        if (distT2 < 25) {
+          handleTakeDamage();
+        }
+
+        // Trace and check collision for Swords weapon orbits
+        const rx = enemy.x + enemy.width / 2;
+        const ry = enemy.y + enemy.height / 2;
+        enemy.swords.forEach((sw: any) => {
+          const orbitRadius = subType === 'skull_eye' ? 100 : 75;
+          const swx = rx + Math.cos(sw.angle) * orbitRadius;
+          const swy = ry + Math.sin(sw.angle) * orbitRadius;
+          const distSw = Math.sqrt(Math.pow((player.x + player.width/2) - swx, 2) + Math.pow((player.y + player.height/2) - swy, 2));
+          if (distSw < 24) {
+            handleTakeDamage();
+          }
+        });
       }
 
       // Check collision with player
@@ -704,6 +1156,15 @@ export default function GameCanvas({ layout, stats, onUpdateCoins, onLevelComple
 
   const updateParticles = () => {
     particlesRef.current.forEach((p: any, idx: number) => {
+      if (p.isHomingVoid) {
+        const player = playerRef.current;
+        const hdx = player.x + player.width / 2 - p.x;
+        const hdy = player.y + player.height / 2 - p.y;
+        const hdist = Math.sqrt(hdx * hdx + hdy * hdy) || 1;
+        p.vx = (hdx / hdist) * 2.8;
+        p.vy = (hdy / hdist) * 2.8;
+      }
+
       p.x += p.vx;
       p.y += p.vy;
       p.life -= p.decay;
@@ -720,6 +1181,149 @@ export default function GameCanvas({ layout, stats, onUpdateCoins, onLevelComple
     });
 
     particlesRef.current = particlesRef.current.filter(p => p.life > 0);
+  };
+
+  const updateZappers = () => {
+    const level = levelStateRef.current;
+    const player = playerRef.current;
+    if (!level.zappers) level.zappers = [];
+
+    // Tick zapper angle updates and check user damage collisions
+    level.zappers.forEach((zp: any) => {
+      if (!zp.active) return;
+      
+      const isSpinned = zp.angle !== undefined;
+      
+      if (isSpinned) {
+        zp.angle += 0.035; // rotate smoothly over time
+      }
+
+      let didCollide = false;
+
+      if (!isSpinned) {
+        // Simple bounding box overlaps for stationary zapper
+        if (isOverlapping(player, zp)) {
+          didCollide = true;
+        }
+      } else {
+        // High fidelity line collision tracking for rotating rods
+        const rx = zp.x + zp.width / 2;
+        const ry = zp.y + zp.height / 2;
+        const len = 90; // length of rotating beam
+
+        const numSamples = 10;
+        for (let s = 0; s <= numSamples; s++) {
+          const ratio = (s / numSamples) - 0.5; // -0.5 to 0.5
+          const sx = rx + Math.cos(zp.angle) * len * ratio;
+          const sy = ry + Math.sin(zp.angle) * len * ratio;
+          
+          if (
+            sx >= player.x && sx <= player.x + player.width &&
+            sy >= player.y && sy <= player.y + player.height
+          ) {
+            didCollide = true;
+            break;
+          }
+        }
+      }
+
+      if (didCollide) {
+        // Trigger damage & small electric lightning spark particles
+        handleTakeDamage();
+        if (Math.random() < 0.3) {
+          spawnExplosionParticles(player.x + player.width/2, player.y + player.height/2, '#facc15', 5);
+        }
+      }
+    });
+  };
+
+  const updatePlayerBullets = () => {
+    const level = levelStateRef.current;
+    playerBulletsRef.current.forEach((bullet: any) => {
+      bullet.x += bullet.vx;
+      bullet.y += bullet.vy;
+      bullet.life -= bullet.decay;
+
+      const bulletBox = { 
+        x: bullet.x - bullet.width / 2, 
+        y: bullet.y - bullet.height / 2, 
+        width: bullet.width, 
+        height: bullet.height 
+      };
+      
+      // Check collision with ALL living enemies
+      level.enemies.forEach((enemy: any) => {
+        if (enemy.health > 0 && isOverlapping(bulletBox, enemy)) {
+          // Check if shield/eye is closed (invincible)
+          if (enemy.isEyeShieldActive) {
+            bullet.life = 0;
+            spawnExplosionParticles(bullet.x, bullet.y, '#60a5fa', 5); // deflective blue sparkles
+            return;
+          }
+
+          // HIT!
+          sound.playDamage();
+          // Jetpack sparkles deal slightly less damage than main gun to maintain balance!
+          enemy.health -= bullet.isJetpackSpark ? 0.4 : 1.0; 
+          bullet.life = 0; // destroy bullet
+          
+          spawnExplosionParticles(bullet.x, bullet.y, bullet.isJetpackSpark ? '#f59e0b' : '#38bdf8', 6);
+          
+          if (enemy.health <= 0) {
+            sound.playVictory();
+            spawnExplosionParticles(enemy.x + enemy.width / 2, enemy.y + enemy.height / 2, '#4ade80', 12);
+            
+            if (enemy.type === 'boss') {
+              setCurrentScore(prev => prev + 1000);
+              // Spawn giant treasure hoard at boss death
+              spawnExplosionParticles(enemy.x, enemy.y, '#facc15', 30);
+
+              if (layout.isBossOnlyLevel) {
+                setTimeout(() => {
+                  triggerLevelVictory();
+                }, 1300);
+              }
+            } else {
+              setCurrentScore(prev => prev + 150);
+            }
+          }
+        }
+      });
+
+      // Bullets (horizontal gun shots) can break/activate Mario question blocks if hitting them!
+      if (!bullet.isJetpackSpark) {
+        level.platforms.forEach((plat: any) => {
+          if (plat.isQuestionBlock && plat.questionState !== 'empty' && isOverlapping(bulletBox, plat)) {
+            plat.questionState = 'empty';
+            plat.bounceY = -12;
+            bullet.life = 0; // destroy bullet
+            sound.playCoin();
+            setCoinsCollected(prev => prev + 1);
+            setCurrentScore(prev => prev + 150);
+            spawnExplosionParticles(plat.x + plat.width / 2, plat.y - 12, '#facc15', 12);
+            
+            // Randomly spawn a Powerup directly above the question block!
+            if (Math.random() < 0.45) {
+              const types = ['shield', 'speed', 'magnet', 'invincibility'];
+              const chosen = types[Math.floor(Math.random() * types.length)];
+              level.powerups.push({
+                id: `pwup_box_${Date.now()}_${Math.random()}`,
+                x: plat.x + plat.width / 2 - 15,
+                y: plat.y - 45,
+                width: 30,
+                height: 30,
+                type: chosen,
+                collected: false
+              });
+              sound.playPowerUp();
+              spawnExplosionParticles(plat.x + plat.width / 2, plat.y - 30, '#a855f7', 8);
+            }
+          }
+        });
+      }
+    });
+
+    playerBulletsRef.current = playerBulletsRef.current.filter(b => b.life > 0);
   };
 
   // Complete procedural 2D layout drawing
@@ -772,6 +1376,9 @@ export default function GameCanvas({ layout, stats, onUpdateCoins, onLevelComple
       }
     });
 
+    // Draw active Jetpack Joyride electric zappers
+    drawZappers(ctx, level.zappers || []);
+
     // Draw particles
     particlesRef.current.forEach((p) => {
       ctx.fillStyle = p.isProjectile ? p.color : `${p.color}`;
@@ -781,6 +1388,20 @@ export default function GameCanvas({ layout, stats, onUpdateCoins, onLevelComple
       ctx.fill();
     });
     ctx.globalAlpha = 1.0;
+
+    // Draw Player Gun Bullets
+    playerBulletsRef.current.forEach((bullet: any) => {
+      ctx.fillStyle = bullet.color;
+      ctx.fillRect(bullet.x - bullet.width / 2, bullet.y - bullet.height / 2, bullet.width, bullet.height);
+      
+      // Core of the bullet
+      ctx.fillStyle = '#ffffff';
+      ctx.fillRect(bullet.x - bullet.width / 2 + 2, bullet.y - bullet.height / 2 + 1, bullet.width - 4, bullet.height - 2);
+      
+      // Trail effect
+      ctx.fillStyle = 'rgba(251, 191, 36, 0.4)';
+      ctx.fillRect(bullet.x - (bullet.vx > 0 ? 12 : -4), bullet.y - 1, 8, 2);
+    });
 
     // Draw Player Mascot
     drawPlayerProcedural(ctx, player);
@@ -805,6 +1426,19 @@ export default function GameCanvas({ layout, stats, onUpdateCoins, onLevelComple
     } else if (t === 'volcano') {
       grad.addColorStop(0, '#451a03'); // extreme hot magma dark volcano core
       grad.addColorStop(1, '#1c1917');
+    } else if (t === 'creepy') {
+      // Different creepy gradients matching each specific boss
+      const subType = layout.bossSubType || 'slime_emperor';
+      if (subType === 'slime_emperor') {
+        grad.addColorStop(0, '#022c22'); // toxic waste dark green
+        grad.addColorStop(1, '#020617');
+      } else if (subType === 'mecha_cyborg') {
+        grad.addColorStop(0, '#111827'); // deep cyberpunk warning grey
+        grad.addColorStop(1, '#0f051a');
+      } else {
+        grad.addColorStop(0, '#450a0a'); // bloody doom crimson red
+        grad.addColorStop(1, '#000000');
+      }
     } else {
       grad.addColorStop(0, '#1e1b4b'); // deep sky cosmic blue indigo
       grad.addColorStop(1, '#030712');
@@ -815,7 +1449,67 @@ export default function GameCanvas({ layout, stats, onUpdateCoins, onLevelComple
 
     // Decorative retro elements in skies: glowing sun or fluffy mountains
     ctx.fillStyle = 'rgba(255,255,255,0.06)';
-    if (t === 'forest' || t === 'desert') {
+    if (t === 'creepy') {
+      const subType = layout.bossSubType || 'slime_emperor';
+      if (subType === 'slime_emperor') {
+        // Spooky slithering green bubbles rising
+        const time = Date.now() / 1400;
+        ctx.fillStyle = 'rgba(16, 185, 129, 0.07)';
+        for (let i = 0; i < 7; i++) {
+          const bubbleX = (canvas.width * (i * 0.15) + Math.sin(time + i) * 50) % canvas.width;
+          const bubbleY = (canvas.height - (time * 80 + i * 70)) % canvas.height;
+          ctx.beginPath();
+          ctx.arc(bubbleX, bubbleY >= 0 ? bubbleY : bubbleY + canvas.height, 20 + Math.sin(time + i) * 8, 0, Math.PI * 2);
+          ctx.fill();
+        }
+        // Blinking red demon eyes staring
+        ctx.fillStyle = '#dc2626';
+        for (let i = 0; i < 4; i++) {
+          const eyeX = 180 + i * 230 + Math.sin(Date.now() / 900 + i) * 10;
+          const eyeY = 80 + Math.cos(Date.now() / 800 + i) * 15;
+          if (Math.floor(Date.now() / 900 + i) % 4 !== 0) {
+            ctx.fillRect(eyeX, eyeY, 7, 3);
+            ctx.fillRect(eyeX + 11, eyeY, 7, 3);
+          }
+        }
+      } else if (subType === 'mecha_cyborg') {
+        // High-voltage electric cage outlines
+        ctx.strokeStyle = 'rgba(6, 182, 212, 0.08)';
+        ctx.lineWidth = 2;
+        for (let x = 80; x < canvas.width; x += 160) {
+          ctx.beginPath();
+          ctx.moveTo(x, 0);
+          ctx.lineTo(x, canvas.height);
+          ctx.stroke();
+        }
+        // Random warnings Sparks lightning lines
+        if (Math.random() < 0.1) {
+          ctx.strokeStyle = 'rgba(244, 63, 94, 0.22)';
+          ctx.lineWidth = 2;
+          ctx.beginPath();
+          ctx.moveTo(Math.random() * canvas.width, 0);
+          ctx.lineTo(Math.random() * canvas.width, canvas.height);
+          ctx.stroke();
+        }
+      } else {
+        // Red giant hell moon center
+        ctx.fillStyle = 'rgba(239, 68, 68, 0.05)';
+        ctx.beginPath();
+        ctx.arc(canvas.width / 2, 130, 95, 0, Math.PI * 2);
+        ctx.fill();
+
+        // Blood-red giant demonic eyes flickering in the heavy smog
+        ctx.fillStyle = 'rgba(239, 68, 68, 0.16)';
+        for (let i = 0; i < 5; i++) {
+          const eyeX = 90 + i * 200 + Math.sin(Date.now() / 1100 + i) * 12;
+          const eyeY = 70 + Math.cos(Date.now() / 1000 + i) * 15;
+          if (Math.floor(Date.now() / 850 + i) % 5 !== 0) {
+            ctx.fillRect(eyeX, eyeY, 12, 4);
+            ctx.fillRect(eyeX + 18, eyeY, 12, 4);
+          }
+        }
+      }
+    } else if (t === 'forest' || t === 'desert') {
       // Draw massive sun sphere
       ctx.beginPath();
       ctx.arc(canvas.width / 1.5 - cameraX * 0.15, 150, 95, 0, Math.PI * 2);
@@ -857,7 +1551,178 @@ export default function GameCanvas({ layout, stats, onUpdateCoins, onLevelComple
     }
   };
 
+  const drawZappers = (ctx: CanvasRenderingContext2D, zappers: any[]) => {
+    zappers.forEach((zp: any) => {
+      const isSpinned = zp.angle !== undefined;
+      const rx = zp.x + zp.width / 2;
+      const ry = zp.y + zp.height / 2;
+      const len = 90; // matching collision len
+
+      ctx.save();
+      
+      // Draw terminal ends (spark plugs)
+      ctx.fillStyle = '#27272a'; // zinc dark cap plugs
+      ctx.strokeStyle = '#facc15'; // yellow glowing tips
+      ctx.lineWidth = 3;
+
+      const drawTerminalPlug = (cx: number, cy: number) => {
+        ctx.beginPath();
+        ctx.arc(cx, cy, 8, 0, Math.PI * 2);
+        ctx.fill();
+        ctx.stroke();
+        
+        ctx.fillStyle = (Date.now() / 250 % 2 < 1) ? '#ef4444' : '#22c55e'; // animated blinker light
+        ctx.fillRect(cx - 2, cy - 2, 4, 4);
+      };
+
+      if (!isSpinned) {
+        // Horizontal of vertical static zappers
+        const isHoriz = zp.width > zp.height;
+        const x1 = isHoriz ? zp.x : rx;
+        const y1 = isHoriz ? ry : zp.y;
+        const x2 = isHoriz ? zp.x + zp.width : rx;
+        const y2 = isHoriz ? ry : zp.y + zp.height;
+
+        // Draw animated electric lightning beam
+        ctx.strokeStyle = '#fbbf24'; // hot orange/gold
+        ctx.lineWidth = 4;
+        ctx.beginPath();
+        ctx.moveTo(x1, y1);
+        const segmentsCount = 8;
+        for (let i = 1; i <= segmentsCount; i++) {
+          const ratio = i / segmentsCount;
+          const px = x1 + (x2 - x1) * ratio;
+          const py = y1 + (y2 - y1) * ratio;
+          
+          // electric buzz distortion
+          const dx = isHoriz ? 0 : (Math.random() - 0.5) * 8;
+          const dy = isHoriz ? (Math.random() - 0.5) * 8 : 0;
+          ctx.lineTo(px + dx, py + dy);
+        }
+        ctx.stroke();
+
+        ctx.strokeStyle = '#ffffff'; // electric ultra core
+        ctx.lineWidth = 1.5;
+        ctx.beginPath();
+        ctx.moveTo(x1, y1);
+        for (let i = 1; i <= segmentsCount; i++) {
+          const ratio = i / segmentsCount;
+          const px = x1 + (x2 - x1) * ratio;
+          const py = y1 + (y2 - y1) * ratio;
+          
+          const dx = isHoriz ? 0 : (Math.random() - 0.5) * 3;
+          const dy = isHoriz ? (Math.random() - 0.5) * 3 : 0;
+          ctx.lineTo(px + dx, py + dy);
+        }
+        ctx.stroke();
+
+        drawTerminalPlug(x1, y1);
+        drawTerminalPlug(x2, y2);
+      } else {
+        // Rotating Zapper
+        const x1 = rx + Math.cos(zp.angle) * len / 2;
+        const y1 = ry + Math.sin(zp.angle) * len / 2;
+        const x2 = rx - Math.cos(zp.angle) * len / 2;
+        const y2 = ry - Math.sin(zp.angle) * len / 2;
+
+        ctx.strokeStyle = '#f97316'; // orange neon fire
+        ctx.lineWidth = 5;
+        ctx.beginPath();
+        ctx.moveTo(x1, y1);
+        
+        const segmentsCount = 10;
+        for (let i = 1; i <= segmentsCount; i++) {
+          const ratio = i / segmentsCount;
+          const px = x1 + (x2 - x1) * ratio;
+          const py = y1 + (y2 - y1) * ratio;
+          
+          // electric lightning buzz wave
+          const normX = -Math.sin(zp.angle);
+          const normY = Math.cos(zp.angle);
+          const offset = (Math.random() - 0.5) * 9;
+          ctx.lineTo(px + normX * offset, py + normY * offset);
+        }
+        ctx.stroke();
+
+        // White core
+        ctx.strokeStyle = '#ffffff';
+        ctx.lineWidth = 1.8;
+        ctx.beginPath();
+        ctx.moveTo(x1, y1);
+        for (let i = 1; i <= segmentsCount; i++) {
+          const ratio = i / segmentsCount;
+          const px = x1 + (x2 - x1) * ratio;
+          const py = y1 + (y2 - y1) * ratio;
+          
+          const normX = -Math.sin(zp.angle);
+          const normY = Math.cos(zp.angle);
+          const offset = (Math.random() - 0.5) * 3;
+          ctx.lineTo(px + normX * offset, py + normY * offset);
+        }
+        ctx.stroke();
+
+        drawTerminalPlug(x1, y1);
+        drawTerminalPlug(x2, y2);
+      }
+
+      ctx.restore();
+    });
+  };
+
   const drawPlatformProcedural = (ctx: CanvasRenderingContext2D, plat: any) => {
+    // Mario style question block drawing override!
+    if (plat.isQuestionBlock) {
+      if (plat.bounceY === undefined) plat.bounceY = 0;
+      
+      // Decay bounceY
+      if (plat.bounceY < 0) {
+        plat.bounceY += 1.2;
+        if (plat.bounceY > 0) plat.bounceY = 0;
+      }
+
+      const drawY = plat.y + plat.bounceY;
+
+      ctx.save();
+      if (plat.questionState === 'empty') {
+        // Brown deactivated solid block
+        ctx.fillStyle = '#7c2d12'; // deep rust Mario hit block
+        ctx.fillRect(plat.x, drawY, plat.width, plat.height);
+        ctx.strokeStyle = '#451a03';
+        ctx.lineWidth = 4;
+        ctx.strokeRect(plat.x + 2, drawY + 2, plat.width - 4, plat.height - 4);
+        
+        // Small corner rivet dots
+        ctx.fillStyle = '#000000';
+        ctx.fillRect(plat.x + 6, drawY + 6, 4, 4);
+        ctx.fillRect(plat.x + plat.width - 10, drawY + 6, 4, 4);
+        ctx.fillRect(plat.x + 6, drawY + plat.height - 10, 4, 4);
+        ctx.fillRect(plat.x + plat.width - 10, drawY + plat.height - 10, 4, 4);
+      } else {
+        // Vibrant flashing neon gold-orange Mario question block!
+        const pulse = Date.now() / 150 % 2 < 1;
+        ctx.fillStyle = pulse ? '#fbbf24' : '#f59e0b';
+        ctx.fillRect(plat.x, drawY, plat.width, plat.height);
+        
+        ctx.strokeStyle = '#d97706'; // gold shadow margin
+        ctx.lineWidth = 3;
+        ctx.strokeRect(plat.x + 1.5, drawY + 1.5, plat.width - 3, plat.height - 3);
+
+        // Render black "?" text centered perfectly
+        ctx.fillStyle = '#7c2d12';
+        ctx.font = `bold ${Math.round(plat.height * 0.7)}px "Space Grotesk", monospace`;
+        ctx.textAlign = 'center';
+        ctx.textBaseline = 'middle';
+        ctx.fillText("?", plat.x + plat.width / 2, drawY + plat.height / 2 + 1);
+
+        // Highlight glints
+        ctx.fillStyle = '#ffffff';
+        ctx.fillRect(plat.x + 4, drawY + 4, 4, 4);
+        ctx.fillRect(plat.x + plat.width - 8, drawY + plat.height - 8, 4, 4);
+      }
+      ctx.restore();
+      return;
+    }
+
     const t = layout.theme;
     
     // Choose beautiful color schemas based on theme
@@ -1097,22 +1962,265 @@ export default function GameCanvas({ layout, stats, onUpdateCoins, onLevelComple
       ctx.fillRect(rx - 6, enemy.y + enemy.height - squeezeY - 4, 3, 3);
       ctx.fillRect(rx + 3, enemy.y + enemy.height - squeezeY - 4, 3, 3);
     } else if (enemy.type === 'boss') {
-      // GIANT pixel heavy master boss block (Spike Dragon)
-      ctx.fillStyle = '#7c2d12';
-      ctx.strokeStyle = '#b91c1c';
-      ctx.lineWidth = 3;
-      ctx.fillRect(enemy.x, enemy.y, enemy.width, enemy.height);
-      ctx.strokeRect(enemy.x, enemy.y, enemy.width, enemy.height);
+      const subType = enemy.bossSubType || 'default';
+      
+      if (subType === 'slime_emperor') {
+        // --- SLIME EMPEROR (Lord Voldeslime) ---
+        const pulse = 1 + Math.sin(Date.now() / 150) * 0.08;
+        const width = enemy.width * pulse;
+        const height = enemy.height * (2 - pulse);
+        const bx = enemy.x + (enemy.width - width) / 2;
+        const by = enemy.y + (enemy.height - height);
 
-      // Spiky crown headers
-      ctx.fillStyle = '#b91c1c';
-      ctx.fillRect(enemy.x + 4, enemy.y - 8, 8, 8);
-      ctx.fillRect(enemy.x + enemy.width - 12, enemy.y - 8, 8, 8);
+        ctx.fillStyle = '#10b981';
+        ctx.strokeStyle = '#047857';
+        ctx.lineWidth = 4;
+        
+        ctx.beginPath();
+        ctx.ellipse(bx + width / 2, by + height / 2, width / 2, height / 2, 0, 0, Math.PI * 2);
+        ctx.fill();
+        ctx.stroke();
 
-      // Angry yellow glowing eyes
-      ctx.fillStyle = '#facc15';
-      ctx.fillRect(enemy.x + 12, enemy.y + 14, 10, 6);
-      ctx.fillRect(enemy.x + enemy.width - 22, enemy.y + 14, 10, 6);
+        ctx.fillStyle = '#34d399';
+        ctx.beginPath();
+        ctx.arc(bx + width * 0.35, by + height * 0.35, width * 0.12, 0, Math.PI * 2);
+        ctx.arc(bx + width * 0.65, by + height * 0.45, width * 0.08, 0, Math.PI * 2);
+        ctx.fill();
+
+        ctx.fillStyle = '#fbbf24';
+        ctx.strokeStyle = '#d97706';
+        ctx.lineWidth = 2;
+        ctx.beginPath();
+        ctx.moveTo(bx + width * 0.25, by + 4);
+        ctx.lineTo(bx + width * 0.35, by - 14);
+        ctx.lineTo(bx + width * 0.5, by - 4);
+        ctx.lineTo(bx + width * 0.65, by - 14);
+        ctx.lineTo(bx + width * 0.75, by + 4);
+        ctx.closePath();
+        ctx.fill();
+        ctx.stroke();
+
+        ctx.fillStyle = '#ef4444';
+        ctx.fillRect(bx + width * 0.46, by - 10, width * 0.08, width * 0.08);
+
+        ctx.fillStyle = '#ffffff';
+        ctx.fillRect(bx + width * 0.28, by + height * 0.42, 10, 10);
+        ctx.fillRect(bx + width * 0.62, by + height * 0.42, 10, 10);
+        ctx.fillStyle = '#dc2626';
+        ctx.fillRect(bx + width * 0.30, by + height * 0.44, 4, 4);
+        ctx.fillRect(bx + width * 0.64, by + height * 0.44, 4, 4);
+
+        ctx.strokeStyle = '#064e3b';
+        ctx.lineWidth = 3;
+        ctx.beginPath();
+        ctx.moveTo(bx + width * 0.22, by + height * 0.3);
+        ctx.lineTo(bx + width * 0.42, by + height * 0.38);
+        ctx.moveTo(bx + width * 0.78, by + height * 0.3);
+        ctx.lineTo(bx + width * 0.58, by + height * 0.38);
+        ctx.stroke();
+        
+      } else if (subType === 'mecha_cyborg') {
+        // --- MECHA BOWSER 9000 ---
+        ctx.fillStyle = enemy.isChargingWarning ? '#dc2626' : '#475569';
+        ctx.strokeStyle = '#1e293b';
+        ctx.lineWidth = 4;
+        
+        ctx.fillRect(enemy.x, enemy.y, enemy.width, enemy.height);
+        ctx.strokeRect(enemy.x, enemy.y, enemy.width, enemy.height);
+
+        const flameHeight = 12 + Math.random() * 12;
+        ctx.fillStyle = '#06b6d4';
+        ctx.fillRect(enemy.x + 12, enemy.y + enemy.height, 14, flameHeight);
+        ctx.fillRect(enemy.x + enemy.width - 26, enemy.y + enemy.height, 14, flameHeight);
+        ctx.fillStyle = '#ffffff';
+        ctx.fillRect(enemy.x + 16, enemy.y + enemy.height, 6, flameHeight/2);
+        ctx.fillRect(enemy.x + enemy.width - 22, enemy.y + enemy.height, 6, flameHeight/2);
+
+        ctx.fillStyle = '#334155';
+        ctx.fillRect(enemy.x + 6, enemy.y + 6, 6, 6);
+        ctx.fillRect(enemy.x + enemy.width - 12, enemy.y + 6, 6, 6);
+        ctx.fillRect(enemy.x + 6, enemy.y + enemy.height - 12, 6, 6);
+        ctx.fillRect(enemy.x + enemy.width - 12, enemy.y + enemy.height - 12, 6, 6);
+
+        ctx.fillStyle = '#0f172a';
+        ctx.beginPath();
+        ctx.arc(rx, ry, enemy.width * 0.24, 0, Math.PI * 2);
+        ctx.fill();
+
+        ctx.fillStyle = enemy.isChargingWarning ? '#facc15' : '#ef4444';
+        ctx.beginPath();
+        ctx.arc(rx, ry, enemy.width * 0.08 + (Math.random() * 3), 0, Math.PI * 2);
+        ctx.fill();
+
+        ctx.fillStyle = '#94a3b8';
+        ctx.strokeStyle = '#334155';
+        ctx.lineWidth = 2;
+        ctx.beginPath();
+        ctx.moveTo(enemy.x, enemy.y + 15);
+        ctx.lineTo(enemy.x - 16, enemy.y + enemy.height/2);
+        ctx.lineTo(enemy.x, enemy.y + enemy.height - 15);
+        ctx.moveTo(enemy.x + enemy.width, enemy.y + 15);
+        ctx.lineTo(enemy.x + enemy.width + 16, enemy.y + enemy.height/2);
+        ctx.lineTo(enemy.x + enemy.width, enemy.y + enemy.height - 15);
+        ctx.closePath();
+        ctx.fill();
+        ctx.stroke();
+
+      } else if (subType === 'skull_eye') {
+        // --- BEHOLDER OF DREAD ---
+        ctx.fillStyle = '#310a0a';
+        ctx.strokeStyle = '#dc2626';
+        ctx.lineWidth = 4;
+        ctx.beginPath();
+        ctx.arc(rx, ry, enemy.width / 2, 0, Math.PI * 2);
+        ctx.fill();
+        ctx.stroke();
+
+        if (enemy.isEyeShieldActive) {
+          ctx.strokeStyle = '#c084fc';
+          ctx.lineWidth = 8;
+          ctx.beginPath();
+          ctx.moveTo(rx, ry - 30);
+          ctx.lineTo(rx, ry + 30);
+          ctx.stroke();
+
+          ctx.fillStyle = '#a855f7';
+          ctx.fillRect(rx - 15, ry - 3, 30, 6);
+        } else {
+          ctx.fillStyle = '#fef2f2';
+          ctx.beginPath();
+          ctx.ellipse(rx, ry, enemy.width*0.35, enemy.width*0.25, 0, 0, Math.PI * 2);
+          ctx.fill();
+
+          ctx.strokeStyle = '#ef4444';
+          ctx.lineWidth = 1.5;
+          ctx.beginPath();
+          ctx.moveTo(rx - 25, ry - 10);
+          ctx.lineTo(rx - 12, ry - 3);
+          ctx.moveTo(rx + 25, ry + 10);
+          ctx.lineTo(rx + 12, ry + 3);
+          ctx.stroke();
+
+          ctx.fillStyle = '#7e22ce';
+          ctx.beginPath();
+          ctx.arc(rx, ry, enemy.width * 0.16, 0, Math.PI * 2);
+          ctx.fill();
+
+          ctx.fillStyle = '#0f051d';
+          ctx.beginPath();
+          ctx.arc(rx, ry, enemy.width * 0.08, 0, Math.PI * 2);
+          ctx.fill();
+
+          ctx.fillStyle = '#ffffff';
+          ctx.fillRect(rx - 4, ry - 4, 4, 4);
+        }
+
+        ctx.fillStyle = '#f1f5f9';
+        ctx.strokeStyle = '#cbd5e1';
+        ctx.lineWidth = 2;
+        ctx.beginPath();
+        ctx.moveTo(rx - enemy.width/2, ry - 10);
+        ctx.quadraticCurveTo(rx - enemy.width/2 - 20, ry - 35, rx - enemy.width/2 - 5, ry - 45);
+        ctx.quadraticCurveTo(rx - enemy.width/2 - 10, ry - 25, rx - enemy.width/2, ry);
+        ctx.moveTo(rx + enemy.width/2, ry - 10);
+        ctx.quadraticCurveTo(rx + enemy.width/2 + 20, ry - 35, rx + enemy.width/2 + 5, ry - 45);
+        ctx.quadraticCurveTo(rx + enemy.width/2 + 10, ry - 25, rx + enemy.width/2, ry);
+        ctx.fill();
+        ctx.stroke();
+
+      } else {
+        ctx.fillStyle = '#7c2d12';
+        ctx.strokeStyle = '#b91c1c';
+        ctx.lineWidth = 3;
+        ctx.fillRect(enemy.x, enemy.y, enemy.width, enemy.height);
+        ctx.strokeRect(enemy.x, enemy.y, enemy.width, enemy.height);
+
+        ctx.fillStyle = '#b91c1c';
+        ctx.fillRect(enemy.x + 4, enemy.y - 8, 8, 8);
+        ctx.fillRect(enemy.x + enemy.width - 12, enemy.y - 8, 8, 8);
+
+        ctx.fillStyle = '#facc15';
+        ctx.fillRect(enemy.x + 12, enemy.y + 14, 10, 6);
+        ctx.fillRect(enemy.x + enemy.width - 22, enemy.y + 14, 10, 6);
+      }
+
+      // Draw active Weapons: Waving slime Tentacles arising from left and right sides!
+      if (enemy.tentacleOffset !== undefined) {
+        ctx.lineWidth = 6;
+        ctx.strokeStyle = '#10b981'; // Green slime tentacle base
+        
+        // Left Tentacle curve
+        const t1x = enemy.x - 20 + Math.sin(enemy.tentacleOffset) * 25;
+        const t1y = enemy.y + enemy.height / 2 + Math.cos(enemy.tentacleOffset) * 35;
+        ctx.beginPath();
+        ctx.moveTo(enemy.x, enemy.y + enemy.height / 2);
+        ctx.quadraticCurveTo(enemy.x - 20, enemy.y + enemy.height / 2 - 10, t1x, t1y);
+        ctx.stroke();
+
+        // Left Tentacle purple spiky pod tip
+        ctx.fillStyle = '#8b5cf6';
+        ctx.beginPath();
+        ctx.arc(t1x, t1y, 10, 0, Math.PI * 2);
+        ctx.fill();
+        ctx.fillStyle = '#ffffff'; // white eyeball tip
+        ctx.fillRect(t1x - 3, t1y - 3, 4, 4);
+
+        // Right Tentacle curve
+        const t2x = enemy.x + enemy.width + 20 + Math.cos(enemy.tentacleOffset) * 25;
+        const t2y = enemy.y + enemy.height / 2 + Math.sin(enemy.tentacleOffset) * 35;
+        ctx.beginPath();
+        ctx.moveTo(enemy.x + enemy.width, enemy.y + enemy.height / 2);
+        ctx.quadraticCurveTo(enemy.x + enemy.width + 20, enemy.y + enemy.height / 2 - 10, t2x, t2y);
+        ctx.stroke();
+
+        // Right Tentacle purple spiky pod tip
+        ctx.fillStyle = '#8b5cf6';
+        ctx.beginPath();
+        ctx.arc(t2x, t2y, 10, 0, Math.PI * 2);
+        ctx.fill();
+        ctx.fillStyle = '#ffffff';
+        ctx.fillRect(t2x - 3, t2y - 3, 4, 4);
+      }
+
+      // Draw active Weapons: Floating, orbiting pixelated dangerous swords!
+      if (enemy.swords) {
+        enemy.swords.forEach((sw: any) => {
+          const swx = rx + Math.cos(sw.angle) * 75;
+          const swy = ry + Math.sin(sw.angle) * 75;
+
+          ctx.save();
+          ctx.translate(swx, swy);
+          ctx.rotate(sw.angle + Math.PI / 4); // angle matching the path + offset
+
+          // Draw double-edged sword hilt & blade
+          // Guard
+          ctx.fillStyle = '#fbbf24'; // Golden guard
+          ctx.fillRect(-8, -2, 16, 4);
+          
+          // Grip
+          ctx.fillStyle = '#78350f'; // Leather grip
+          ctx.fillRect(-2, 2, 4, 6);
+          ctx.fillStyle = '#b91c1c'; // Pommel red
+          ctx.fillRect(-3, 8, 6, 2);
+
+          // Blade (Glowing laser steel)
+          ctx.fillStyle = '#e2e8f0'; // Slated silver blade
+          ctx.fillRect(-3, -22, 6, 20);
+          ctx.fillStyle = '#38bdf8'; // Sky blue glowing center edge line
+          ctx.fillRect(-1, -22, 2, 20);
+
+          // Tip point
+          ctx.fillStyle = '#e2e8f0';
+          ctx.beginPath();
+          ctx.moveTo(-3, -22);
+          ctx.lineTo(0, -28);
+          ctx.lineTo(3, -22);
+          ctx.closePath();
+          ctx.fill();
+
+          ctx.restore();
+        });
+      }
 
       // HP Bar above boss
       const barY = enemy.y - 20;
@@ -1184,6 +2292,22 @@ export default function GameCanvas({ layout, stats, onUpdateCoins, onLevelComple
       ctx.fillRect(player.x + (player.facing > 0 ? -6 : 24), player.y + 16, 6, 16);
     }
 
+    // Draw Jetpack Joyride styled jetpack canister on player's back!
+    if (isJetpackMode) {
+      ctx.fillStyle = '#fbbf24'; // bright golden jetpack frame yellow!
+      const packX = player.facing > 0 ? player.x - 8 : player.x + player.width + 2;
+      const packY = player.y + 14;
+      ctx.fillRect(packX, packY, 6, 20); // main jetpack frame (dual canisters)
+      
+      ctx.fillStyle = '#ef4444'; // red thruster bands
+      ctx.fillRect(packX - 1, packY + 4, 8, 3);
+      ctx.fillRect(packX - 1, packY + 12, 8, 3);
+      
+      // nozzle tip at bottom
+      ctx.fillStyle = '#3f3f46';
+      ctx.fillRect(packX + 1, packY + 20, 4, 3);
+    }
+
     // Animated hopping legs to resemble walking
     ctx.fillStyle = '#1e1b4b'; // dark trouser lines
     const legOffset = (player.animFrame % 2) * 3;
@@ -1206,6 +2330,31 @@ export default function GameCanvas({ layout, stats, onUpdateCoins, onLevelComple
       ctx.strokeStyle = `hsl(${(Date.now() / 4) % 360}, 100%, 70%)`;
       ctx.lineWidth = 3;
       ctx.strokeRect(player.x - 4, player.y - 4, player.width + 8, player.height + 8);
+    }
+
+    // Draw modern holding GUN (Retro mobile arcade style gun!)
+    ctx.fillStyle = '#4b5563'; // metal armor gray
+    const gunX = player.facing > 0 ? player.x + player.width - 2 : player.x - 12;
+    const gunY = player.y + 22;
+    ctx.fillRect(gunX, gunY, 14, 8); // main barrel block
+    ctx.fillStyle = '#111827'; // stock and barrel hole
+    const gunMuzzleX = player.facing > 0 ? gunX + 10 : gunX;
+    ctx.fillRect(gunMuzzleX, gunY, 4, 4); 
+    ctx.fillStyle = '#9ca3af'; // grip/trigger
+    const gripX = player.facing > 0 ? gunX + 2 : gunX + 8;
+    ctx.fillRect(gripX, gunY + 6, 3, 5);
+
+    // Muzzle flash when shooting!
+    if (player.shootCooldown > 9) {
+      const flashX = player.facing > 0 ? gunX + 14 : gunX - 10;
+      ctx.fillStyle = '#fbbf24';
+      ctx.beginPath();
+      ctx.arc(flashX, gunY + 2, 8, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.fillStyle = '#ffffff';
+      ctx.beginPath();
+      ctx.arc(flashX, gunY + 2, 4, 0, Math.PI * 2);
+      ctx.fill();
     }
   };
 
@@ -1255,6 +2404,17 @@ export default function GameCanvas({ layout, stats, onUpdateCoins, onLevelComple
         {/* Options */}
         <div className="flex items-center gap-3">
           <button
+            onClick={() => setIsJetpackMode(!isJetpackMode)}
+            className={`text-[10px] sm:text-xs py-1 px-2 rounded font-mono uppercase cursor-pointer flex items-center gap-1 border transition-all ${
+              isJetpackMode
+                ? "bg-yellow-950/60 border-yellow-500 text-yellow-400 shadow-[0_0_8px_rgba(234,179,8,0.25)] font-bold animate-pulse"
+                : "bg-zinc-900 border-zinc-700 text-zinc-400 hover:bg-zinc-800"
+            }`}
+            title="Toggle between Jetpack Joyride continuous flight or pure Super Mario jumps"
+          >
+            🚀 {isJetpackMode ? "Jetpack Mode: ON" : "Mario Jumps: ON"}
+          </button>
+          <button
             onClick={handleMuteToggle}
             className="p-1.5 bg-zinc-900 border border-zinc-700 rounded hover:bg-zinc-800 text-zinc-300 cursor-pointer"
           >
@@ -1284,6 +2444,31 @@ export default function GameCanvas({ layout, stats, onUpdateCoins, onLevelComple
           height={600}
           className="w-full h-full block bg-zinc-950"
         />
+
+        {/* Epic Grand Boss HUD Health Bar Overlay at Top Center of Screen! */}
+        {(() => {
+          const boss = levelStateRef.current?.enemies?.find((e: any) => e.type === 'boss' && e.health > 0);
+          if (!boss || !isPlaying || isGameOver || isGameWon) return null;
+
+          const percent = Math.max(0, (boss.health / boss.maxHealth) * 100);
+          return (
+            <div className="absolute top-4 left-1/2 -translate-x-1/2 w-full max-w-[280px] sm:max-w-[360px] bg-zinc-950/90 border-2 border-red-600/80 p-2.5 rounded shadow-[0_0_15px_rgba(220,38,38,0.4)] font-mono text-center select-none z-10">
+              <div className="flex justify-between text-[10px] sm:text-xs font-black uppercase text-red-500 tracking-wider mb-1">
+                <span className="animate-pulse">⚠️ BOSS COMBAT</span>
+                <span>{boss.bossName || 'SPIKE DRAGON'}</span>
+              </div>
+              <div className="w-full h-3 bg-red-950 rounded-sm overflow-hidden border border-red-700">
+                <div
+                  className="h-full bg-gradient-to-r from-red-600 via-orange-500 to-yellow-400 transition-all duration-150"
+                  style={{ width: `${percent}%` }}
+                />
+              </div>
+              <div className="text-[9px] text-zinc-500 mt-1 uppercase">
+                HEALTH POINTS: {Math.ceil(boss.health)} / {boss.maxHealth}
+              </div>
+            </div>
+          );
+        })()}
 
         {/* Pause Overlay */}
         {!isPlaying && !isGameOver && !isGameWon && (
@@ -1385,7 +2570,18 @@ export default function GameCanvas({ layout, stats, onUpdateCoins, onLevelComple
           <div className="text-right hidden sm:block">
             <p className="text-[10px] font-mono text-zinc-500 uppercase">SPACE: Jump</p>
             <p className="text-[10px] font-mono text-zinc-500 uppercase">SHIFT: Dash</p>
+            <p className="text-[10px] font-mono text-zinc-500 uppercase">F / ENTER: Shoot Gun</p>
           </div>
+
+          <button
+            onMouseDown={() => { virtualControlsRef.current.shoot = true; }}
+            onMouseUp={() => { virtualControlsRef.current.shoot = false; }}
+            onTouchStart={(e) => { e.preventDefault(); virtualControlsRef.current.shoot = true; }}
+            onTouchEnd={(e) => { e.preventDefault(); virtualControlsRef.current.shoot = false; }}
+            className="w-14 h-14 bg-amber-600 active:bg-amber-500 border-2 border-amber-400 rounded-full flex items-center justify-center font-mono font-bold text-xs text-yellow-100 shadow-lg select-none"
+          >
+            SHOOT
+          </button>
 
           <button
             onMouseDown={() => { virtualControlsRef.current.dash = true; }}

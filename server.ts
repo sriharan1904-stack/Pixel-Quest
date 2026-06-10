@@ -177,6 +177,23 @@ function generateProceduralLevel(theme: string, difficulty: string, lengthInTile
     behavior: "static"
   });
 
+  // Spawn Boss Enemy at end floor!
+  enemies.push({
+    id: `e_boss_championship`,
+    x: bossAreaX + 80,
+    y: 386, // 450 - 64 height
+    width: 64,
+    height: 64,
+    type: 'boss',
+    health: difficulty === 'hard' ? 12 : difficulty === 'medium' ? 8 : 6,
+    maxHealth: difficulty === 'hard' ? 12 : difficulty === 'medium' ? 8 : 6,
+    speed: 1.5,
+    patrolRange: 150,
+    startX: bossAreaX + 80,
+    startY: 386,
+    direction: -1
+  });
+
   // Collectibles at end chest
   collectibles.push({
     id: `c_chest`,
@@ -530,6 +547,135 @@ app.post("/api/generate-npc", async (req, res) => {
     res.json(JSON.parse(response.text?.trim() || "{}"));
   } catch (error) {
     res.json(fallbackDialogue);
+  }
+});
+
+// ---------------------------------------------------------
+// ROUTE: AI Chiptune composer
+// ---------------------------------------------------------
+function generateProceduralMusic(mood: string) {
+  const isUpbeat = mood.toLowerCase().includes('upbeat') || mood.toLowerCase().includes('happy') || mood.toLowerCase().includes('party') || mood.toLowerCase().includes('heroic') || mood.toLowerCase().includes('victory') || mood.toLowerCase().includes('theme');
+  const tempo = isUpbeat ? 150 : 120;
+  
+  const notes = [];
+  const bassline = [];
+  
+  // Melodic scale options
+  const scale = isUpbeat 
+    ? [261.63, 293.66, 329.63, 392.00, 440.00, 523.25, 587.33, 659.25] // C Major Pentatonic
+    : [220.00, 261.63, 293.66, 329.63, 392.00, 440.00, 523.25, 587.33]; // A Minor Pentatonic
+    
+  const bassScale = isUpbeat
+    ? [65.41, 73.42, 82.41, 98.00, 110.00] 
+    : [55.00, 65.41, 73.42, 82.41, 98.00];
+
+  for (let i = 0; i < 16; i++) {
+    // melody notes
+    const freqIndex = Math.floor(Math.sin(i * 0.5) * 3 + 4) % scale.length;
+    notes.push({
+      freq: scale[freqIndex],
+      duration: 0.25,
+      type: 'triangle'
+    });
+
+    // bassline
+    const bassIndex = Math.floor(i / 2) % bassScale.length;
+    bassline.push({
+      freq: bassScale[bassIndex],
+      duration: 0.5,
+      type: 'square'
+    });
+  }
+
+  return {
+    name: mood ? `Procedural ${mood.substring(0, 24)} Loop` : "Infinite Jammer (Offline)",
+    tempo,
+    notes,
+    bassline
+  };
+}
+
+app.post("/api/generate-music", async (req, res) => {
+  const { prompt } = req.body;
+  const mood = prompt || "upbeat retro gameplay theme";
+  const ai = getAiClient();
+
+  if (!ai) {
+    return res.json(generateProceduralMusic(mood));
+  }
+
+  try {
+    const promptText = `Compose a creative looping retro chiptune 8-bit soundtrack for a 2012 mobile platformer based on this request: "${mood}".
+    
+    You need to output a JSON list of musical notes and bass notes. Specify their actual frequencies in Hz.
+    Reference note values:
+    C4: 261.63, D4: 293.66, E4: 329.63, F4: 349.23, G4: 392.00, A4: 440.00, B4: 493.88,
+    C5: 523.25, D5: 587.33, E5: 659.25, F5: 698.46, G5: 783.99, A5: 880.00, B5: 987.77.
+    
+    Guidelines:
+    - Keep track length between 12 to 24 notes.
+    - Set tempo between 110 (slow/chill/creepy) and 180 BPM (intense/fast/boss).
+    - Provide a matching bassline (using frequencies between 50Hz and 220Hz, e.g. C2 is 65.41Hz, C3 is 130.81Hz).
+    - Types allowed are: "triangle", "square", "sawtooth", "sine".
+    
+    Respond in JSON only using the following schema:
+    {
+      "name": string (cool retro arcade name like "Cosmic Oasis Gate"),
+      "tempo": number (between 110 and 180),
+      "notes": [
+        { "freq": number, "duration": number, "type": "triangle" | "square" | "sawtooth" | "sine" }
+      ],
+      "bassline": [
+        { "freq": number, "duration": number, "type": "triangle" | "square" | "sawtooth" | "sine" }
+      ]
+    }`;
+
+    const response = await ai.models.generateContent({
+      model: "gemini-3.5-flash",
+      contents: promptText,
+      config: {
+        responseMimeType: "application/json",
+        responseSchema: {
+          type: Type.OBJECT,
+          required: ["name", "tempo", "notes", "bassline"],
+          properties: {
+            name: { type: Type.STRING },
+            tempo: { type: Type.NUMBER },
+            notes: {
+              type: Type.ARRAY,
+              items: {
+                type: Type.OBJECT,
+                required: ["freq", "duration", "type"],
+                properties: {
+                  freq: { type: Type.NUMBER },
+                  duration: { type: Type.NUMBER },
+                  type: { type: Type.STRING }
+                }
+              }
+            },
+            bassline: {
+              type: Type.ARRAY,
+              items: {
+                type: Type.OBJECT,
+                required: ["freq", "duration", "type"],
+                properties: {
+                  freq: { type: Type.NUMBER },
+                  duration: { type: Type.NUMBER },
+                  type: { type: Type.STRING }
+                }
+              }
+            }
+          }
+        }
+      }
+    });
+
+    const bodyStr = response.text?.trim() || "";
+    const parsed = JSON.parse(bodyStr);
+    res.json(parsed);
+  } catch (err) {
+    console.error("Gemini music gen failed, using procedural fallback.", err);
+    res.json(generateProceduralMusic(mood));
   }
 });
 

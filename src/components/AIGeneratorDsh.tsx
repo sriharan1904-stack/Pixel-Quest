@@ -1,5 +1,5 @@
 import React, { useState, useEffect } from 'react';
-import { Sparkles, Brain, Code, Terminal, Play, RotateCw, MessagesSquare, Compass, ShieldAlert, Target } from 'lucide-react';
+import { Sparkles, Brain, Code, Terminal, Play, RotateCw, MessagesSquare, Compass, ShieldAlert, Target, Music, Volume2, Pause, Flame } from 'lucide-react';
 import { sound } from '../sound';
 import { AIQuest, NPCDialogue, ThemeType } from '../types';
 
@@ -27,6 +27,13 @@ export default function AIGeneratorDsh({ quest, onRefreshQuest, onPlayGeneratedL
     farewell: "Stay safe out there! Watch your step, gravity is a cruel mistress."
   });
   const [isGeneratingNpc, setIsGeneratingNpc] = useState(false);
+
+  // Music Jukebox State
+  const [musicPrompt, setMusicPrompt] = useState('Epic Space Battle Theme');
+  const [isComposingMusic, setIsComposingMusic] = useState(false);
+  const [composedTrack, setComposedTrack] = useState<{ name: string; tempo: number; notes: { freq: number; duration: number; type: string }[]; bassline?: { freq: number; duration: number; type: string }[] } | null>(null);
+  const [bindMusic, setBindMusic] = useState(true);
+  const [isPlayingTest, setIsPlayingTest] = useState(false);
 
   // Auto scroll logs
   useEffect(() => {
@@ -77,6 +84,9 @@ export default function AIGeneratorDsh({ quest, onRefreshQuest, onPlayGeneratedL
       });
 
       const layout = await response.json();
+      if (composedTrack && bindMusic) {
+        layout.customBgm = composedTrack;
+      }
       setIsGenerating(false);
       sound.playVictory();
       onPlayGeneratedLevel(layout);
@@ -102,6 +112,41 @@ export default function AIGeneratorDsh({ quest, onRefreshQuest, onPlayGeneratedL
       console.error(e);
     } finally {
       setIsGeneratingNpc(false);
+    }
+  };
+
+  const handleComposeMusic = async () => {
+    sound.playCoin();
+    setIsComposingMusic(true);
+    setIsPlayingTest(false);
+    try {
+      const response = await fetch('/api/generate-music', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ prompt: musicPrompt })
+      });
+      const data = await response.json();
+      setComposedTrack(data);
+      sound.playPowerUp();
+      
+      // Auto-preview play
+      sound.playAIComposition(data);
+      setIsPlayingTest(true);
+    } catch (e) {
+      console.error(e);
+    } finally {
+      setIsComposingMusic(false);
+    }
+  };
+
+  const handleTogglePlayTest = () => {
+    if (!composedTrack) return;
+    if (isPlayingTest) {
+      sound.stopBGM();
+      setIsPlayingTest(false);
+    } else {
+      sound.playAIComposition(composedTrack);
+      setIsPlayingTest(true);
     }
   };
 
@@ -363,6 +408,190 @@ export default function AIGeneratorDsh({ quest, onRefreshQuest, onPlayGeneratedL
                 </div>
               </div>
             )}
+          </div>
+        </div>
+      </div>
+
+      {/* AI Chiptune Jukebox */}
+      <div className="bg-zinc-900 border-4 border-zinc-700 p-6 rounded-lg relative overflow-hidden">
+        <div className="absolute -top-10 -right-10 opacity-5">
+          <Music className="w-48 h-48 text-emerald-400" />
+        </div>
+
+        <div className="flex flex-col sm:flex-row justify-between items-start sm:items-center gap-3 border-b-4 border-zinc-800 pb-3 mb-6">
+          <div className="flex items-center gap-2">
+            <Music className="w-6 h-6 text-emerald-400 animate-bounce" />
+            <div>
+              <h3 className="font-mono text-base font-extrabold text-emerald-400 uppercase">AI Chiptune Jukebox Composer</h3>
+              <p className="text-xs text-zinc-500 font-mono">Design retro 2D gameplay soundtracks using Gemini AI</p>
+            </div>
+          </div>
+          
+          <div className="flex items-center gap-2">
+            <label className="flex items-center gap-2 cursor-pointer font-mono text-[11px] text-zinc-400 bg-zinc-950 border border-zinc-800 px-3 py-1.5 rounded hover:border-zinc-700 select-none">
+              <input
+                type="checkbox"
+                checked={bindMusic}
+                onChange={(e) => setBindMusic(e.target.checked)}
+                className="accent-yellow-400 cursor-pointer"
+              />
+              <span>BIND TO SANDBOX GAMEPLAY</span>
+            </label>
+          </div>
+        </div>
+
+        <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
+          {/* Prompt inputs and presets column */}
+          <div className="space-y-4">
+            <div>
+              <label className="block text-[11px] font-mono font-bold uppercase text-zinc-400 mb-1">Compose Prompt Vibe</label>
+              <input
+                type="text"
+                value={musicPrompt}
+                onChange={(e) => setMusicPrompt(e.target.value)}
+                placeholder="e.g. Fast upbeat rocket space theme..."
+                className="w-full bg-zinc-950 text-xs text-zinc-200 border-2 border-zinc-700 rounded px-3 py-2.5 focus:border-emerald-400 font-mono"
+              />
+            </div>
+
+            <div>
+              <label className="block text-[11px] font-mono font-bold uppercase text-zinc-400 mb-2">Preset Quick Themes</label>
+              <div className="grid grid-cols-2 gap-2">
+                {[
+                  { label: "🚀 Space Adventure", prompt: "Fast upbeat cosmic space odyssey theme with glitchy sound effects" },
+                  { label: "🔥 Volcano Metal", prompt: "Heavy frantic magma speed metal boss theme loop" },
+                  { label: "🌲 Forest Waltz", prompt: "Happy nostalgic grassland valley waltz with cute arpeggio ticks" },
+                  { label: "👻 Creepy Crypt", prompt: "Slow haunting gothic castle dungeon melody track" },
+                  { label: "🏝️ Desert Oasis", prompt: "Calm sandy bazaar theme with triangle pitch waves" }
+                ].map((preset, idx) => (
+                  <button
+                    key={idx}
+                    onClick={() => { sound.playCoin(); setMusicPrompt(preset.prompt); }}
+                    className="py-1 px-2 text-[10px] text-left border border-zinc-800 bg-zinc-950/60 hover:bg-zinc-800 text-zinc-300 font-mono rounded overflow-hidden truncate transition cursor-pointer"
+                  >
+                    {preset.label}
+                  </button>
+                ))}
+              </div>
+            </div>
+
+            <button
+              onClick={handleComposeMusic}
+              disabled={isComposingMusic}
+              className="w-full py-3 bg-emerald-700 hover:bg-emerald-600 border-b-4 border-emerald-900 active:border-b-0 text-white font-mono text-xs font-bold uppercase rounded cursor-pointer flex items-center justify-center gap-2 transition"
+            >
+              <Sparkles className="w-4 h-4" /> {isComposingMusic ? "Composing Track..." : "Compose AI Soundtrack"}
+            </button>
+          </div>
+
+          {/* Active compiled track column (Synthesizer player) */}
+          <div className="lg:col-span-2 space-y-4">
+            <div className="bg-zinc-950 border-2 border-zinc-800 p-5 rounded-lg space-y-4">
+              <div className="flex flex-col sm:flex-row justify-between items-start sm:items-center gap-3 border-b border-zinc-900 pb-3">
+                <div className="flex items-center gap-2.5">
+                  <div className="bg-emerald-500/10 border border-emerald-500/20 p-2 rounded-full">
+                    <Volume2 className={`w-5 h-5 text-emerald-400 ${isPlayingTest ? "animate-bounce" : ""}`} />
+                  </div>
+                  <div>
+                    <span className="text-[9px] font-mono uppercase text-zinc-500 tracking-wider">Active Track Composition</span>
+                    <h4 className="font-mono text-sm font-bold text-yellow-400 uppercase mt-0.5">
+                      {composedTrack ? composedTrack.name : "Infinite Jammer (Default)"}
+                    </h4>
+                  </div>
+                </div>
+
+                <div className="flex items-center gap-2 select-none">
+                  <span className="font-mono text-[10px] bg-zinc-900 px-2 py-1 rounded text-zinc-400">
+                    TEMPO: <span className="text-yellow-400 font-bold">{composedTrack ? composedTrack.tempo : 135} BPM</span>
+                  </span>
+                  
+                  {composedTrack && (
+                    <button
+                      onClick={handleTogglePlayTest}
+                      className="px-3 py-1.5 bg-zinc-900 hover:bg-zinc-800 text-zinc-200 hover:text-white rounded border border-zinc-800 text-xs font-mono font-bold uppercase transition flex items-center gap-1.5 cursor-pointer"
+                    >
+                      {isPlayingTest ? (
+                        <>
+                          <Pause className="w-3.5 h-3.5 text-zinc-400" /> STOP
+                        </>
+                      ) : (
+                        <>
+                          <Play className="w-3.5 h-3.5 text-emerald-400 fill-emerald-400" /> PLAY
+                        </>
+                      )}
+                    </button>
+                  )}
+                </div>
+              </div>
+
+              {/* Note matrix visualizer */}
+              <div className="space-y-3">
+                <div className="flex justify-between items-baseline font-mono text-[9px] text-zinc-400">
+                  <span>SYNTH WAVEFORM PATTERNS</span>
+                  <span className="text-zinc-500">{composedTrack ? `${composedTrack.notes.length} Notes Compiled` : "BGM Loops active"}</span>
+                </div>
+
+                <div className="h-24 bg-zinc-900/60 rounded border border-zinc-900 relative p-3 flex items-end gap-1 overflow-hidden">
+                  {composedTrack ? (
+                    composedTrack.notes.map((note: any, idx: number) => {
+                      // Normalize frequency between 200 and 1000 for height visualization
+                      const normalizedHeight = Math.min(90, Math.max(15, ((note.freq - 200) / 800) * 80));
+                      // Highlighting the current playing beat if active
+                      const isCurrentPlaying = isPlayingTest && Math.floor(Date.now() / 300) % composedTrack.notes.length === idx;
+
+                      return (
+                        <div
+                          key={idx}
+                          title={`${note.freq}Hz`}
+                          className="flex-1 transition-all duration-300 rounded cursor-help"
+                          style={{
+                            height: `${normalizedHeight}%`,
+                            backgroundColor: isCurrentPlaying
+                              ? "#10b981"
+                              : note.type === "sawtooth"
+                              ? "#ef4444"
+                              : note.type === "square"
+                              ? "#eab308"
+                              : note.type === "sine"
+                              ? "#3b82f6"
+                              : "#a855f7"
+                          }}
+                        />
+                      );
+                    })
+                  ) : (
+                    /* Cool animated placeholder */
+                    <div className="absolute inset-0 flex flex-col justify-center items-center text-center p-4">
+                      <p className="text-[10px] font-mono text-zinc-650 uppercase">No custom AI track composed yet</p>
+                      <p className="text-[9px] font-sans text-zinc-500 mt-1 max-w-sm">
+                        Prompt the Gemini Composer above (e.g. "Dungeon Chase") to compose, playtest, and play sandbox runs with your custom music beats!
+                      </p>
+                    </div>
+                  )}
+                </div>
+
+                {composedTrack && (
+                  <div className="flex flex-wrap gap-4 pt-1 text-[9px] font-mono text-zinc-400">
+                    <div className="flex items-center gap-1.5">
+                      <span className="w-2.5 h-2.5 bg-purple-500 rounded-sm" />
+                      <span>TRIANGLE (MELODY Lead)</span>
+                    </div>
+                    <div className="flex items-center gap-1.5">
+                      <span className="w-2.5 h-2.5 bg-yellow-500 rounded-sm" />
+                      <span>SQUARE (BASS Line)</span>
+                    </div>
+                    <div className="flex items-center gap-1.5">
+                      <span className="w-2.5 h-2.5 bg-blue-500 rounded-sm" />
+                      <span>SINE (PEACEFUL Waves)</span>
+                    </div>
+                    <div className="flex items-center gap-1.5">
+                      <span className="w-2.5 h-2.5 bg-red-500 rounded-sm" />
+                      <span>SAWTOOTH (HEAVY Synths)</span>
+                    </div>
+                  </div>
+                )}
+              </div>
+            </div>
           </div>
         </div>
       </div>

@@ -11,15 +11,81 @@ import { PlayerStats, Achievement, AIQuest, LevelScore, ThemeType } from './type
 function getStoredWorldLevel(world: number, stage: number): any {
   // Let's create themes matching worlds
   const themes: ThemeType[] = ['forest', 'desert', 'ice', 'volcano', 'sky'];
-  const theme = themes[world - 1];
-  const difficulty = stage === 1 ? 'easy' : stage === 2 ? 'medium' : 'hard';
-  const lengthTiles = stage === 1 ? 100 : stage === 2 ? 160 : 220;
+  const theme = world === 6 ? 'creepy' : themes[world - 1];
+  const difficulty = world === 6 ? 'hard' : (stage === 1 ? 'easy' : stage === 2 ? 'medium' : 'hard');
+  const lengthTiles = world === 6 ? 38 : (stage === 1 ? 100 : stage === stage === 2 ? 160 : 220);
 
   // Render a lovely visual set of platforms
   const platforms = [];
   const enemies = [];
   const collectibles = [];
   const powerups = [];
+
+  if (world === 6) {
+    // 👹 DEDICATED CREEPY BOSS ARENA-ONLY LEVEL! NO LENGTHY TRAVERSAL.
+    // Flat ground platform
+    platforms.push({ id: `boss_floor`, x: 0, y: 440, width: 1200, height: 160, behavior: 'static' });
+    
+    // Floating Mario Question Blocks for tactility & Jetpack fuel/powerups
+    platforms.push({ id: `boss_qb_1`, x: 300, y: 300, width: 44, height: 44, isQuestionBlock: true, questionState: 'active', questionContent: 'shield', bounceY: 0 });
+    platforms.push({ id: `boss_qb_2`, x: 550, y: 200, width: 44, height: 44, isQuestionBlock: true, questionState: 'active', questionContent: 'invincibility', bounceY: 0 });
+    platforms.push({ id: `boss_qb_3`, x: 800, y: 300, width: 44, height: 44, isQuestionBlock: true, questionState: 'active', questionContent: 'speed', bounceY: 0 });
+
+    // Floating static platforms to gain vertical high ground
+    platforms.push({ id: `boss_plat_left`, x: 150, y: 260, width: 100, height: 24, behavior: 'static' });
+    platforms.push({ id: `boss_plat_right`, x: 950, y: 260, width: 100, height: 24, behavior: 'static' });
+
+    // Scattered quick coins to collect while flying
+    for (let i = 0; i < 8; i++) {
+      collectibles.push({
+        id: `boss_coin_${i}`,
+        x: 200 + i * 110,
+        y: 120 + Math.sin(i) * 40,
+        width: 20,
+        height: 20,
+        type: 'coin',
+        collected: false,
+        value: 1
+      });
+    }
+
+    // Elite Dread Boss details matching the stage
+    const bossType = stage === 1 ? 'slime_emperor' : stage === 2 ? 'mecha_cyborg' : 'skull_eye';
+    const bossName = stage === 1 ? 'Lord Voldeslime' : stage === 2 ? 'Mecha Bowser 9000' : 'Beholder of Dread';
+    const hp = stage === 1 ? 35 : stage === 2 ? 55 : 80;
+
+    enemies.push({
+      id: `w_boss_final_s${stage}`,
+      x: 850,
+      y: 280,
+      width: stage === 3 ? 96 : 80, // Beholder of Dread is colossal!
+      height: stage === 3 ? 96 : 80,
+      type: 'boss',
+      bossSubType: bossType,
+      bossName: bossName,
+      health: hp,
+      maxHealth: hp,
+      speed: stage === 1 ? 1.5 : stage === 2 ? 2.5 : 3.5,
+      patrolRange: 320,
+      startX: 850,
+      startY: 230,
+      direction: -1
+    });
+
+    return {
+      theme,
+      difficulty,
+      length: 38, // Single screen width arena
+      platforms,
+      enemies,
+      collectibles,
+      powerups,
+      checkpoint: { x: 100, y: 380, activated: false },
+      goal: { x: 99999, y: 99999, width: 40, height: 80 }, // goal is out of bounds; only killing boss wins this level!
+      isBossOnlyLevel: true,
+      bossSubType: bossType
+    };
+  }
 
   // Spawn Platform
   platforms.push({ id: `w_start`, x: 0, y: 440, width: 450, height: 160, behavior: 'static' });
@@ -612,14 +678,15 @@ export default function App() {
               <p className="text-xs text-zinc-500 font-mono mt-1 uppercase">Select world gates and gather shiny stage levels star medals</p>
             </div>
 
-            {/* List 5 beautiful thematic worlds */}
+            {/* List 6 beautiful thematic worlds including the Creepy Dread Arena! */}
             <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
               {[
                 { world: 1, name: 'Glasslands', theme: 'forest', color: 'from-emerald-900 to-teal-950 border-emerald-500 bg-emerald-950/20' },
                 { world: 2, name: 'Desert Sandscape', theme: 'desert', color: 'from-amber-900 to-orange-950 border-amber-500 bg-amber-950/20' },
                 { world: 3, name: 'Glacial Icepeaks', theme: 'ice', color: 'from-sky-900 to-cyan-950 border-sky-400 bg-cyan-950/20' },
                 { world: 4, name: 'Volcano Magma-core', theme: 'volcano', color: 'from-red-950 to-stone-950 border-red-500 bg-red-950/20' },
-                { world: 5, name: 'Azure Sky Castle', theme: 'sky', color: 'from-indigo-950 to-purple-950 border-indigo-400 bg-indigo-950/20 animate-pulse' }
+                { world: 5, name: 'Azure Sky Castle', theme: 'sky', color: 'from-indigo-950 to-purple-950 border-indigo-400 bg-indigo-950/20' },
+                { world: 6, name: 'Creepy Dread Arena', theme: 'creepy', color: 'from-purple-950 via-red-950 to-black border-red-600 bg-red-950/35 animate-pulse shadow-[0_0_20px_rgba(220,38,38,0.35)]' }
               ].map((worldObj) => {
                 // Is this world unlocked? World 1 is always open, others need stars or previous completed
                 const isWorldUnlocked = worldObj.world === 1 || stats.starsUnlocked >= (worldObj.world - 1) * 2;

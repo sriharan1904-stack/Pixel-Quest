@@ -27,6 +27,10 @@ export interface Platform extends LevelElement {
   state?: 'idle' | 'falling' | 'destroyed';
   timer?: number;
   resetTimer?: number;
+  isQuestionBlock?: boolean;
+  questionState?: 'active' | 'empty';
+  questionContent?: 'coin' | 'gem' | 'shield';
+  bounceY?: number;
 }
 
 export interface Enemy {
@@ -79,6 +83,16 @@ export interface Checkpoint {
   activated: boolean;
 }
 
+export interface Zapper {
+  id: string;
+  x: number;
+  y: number;
+  width: number;
+  height: number;
+  angle?: number;
+  active: boolean;
+}
+
 export interface LevelLayout {
   theme: ThemeType;
   difficulty: 'easy' | 'medium' | 'hard';
@@ -89,7 +103,14 @@ export interface LevelLayout {
   powerups: PowerUp[];
   checkpoint: Vector2D;
   goal: { x: number; y: number; width: number; height: number };
+  zappers?: Zapper[];
   boss?: Enemy;
+  customBgm?: {
+    name: string;
+    tempo: number;
+    notes: { freq: number; duration: number; type: string }[];
+    bassline?: { freq: number; duration: number; type: string }[];
+  };
 }
 
 // Player States
